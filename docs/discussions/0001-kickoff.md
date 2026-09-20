@@ -1,199 +1,180 @@
-# [RFC 0001] 我们究竟要复现什么：Clio-style 层次语义聚类的目标、边界与验收
+# [RFC 0001] V1 Tracer Bullet：最快跑通 Clio-style 层次聚类
 
 > **建议分类**：General  
-> **状态**：征求意见  
-> **目标**：接受、修改或拒绝项目章程；在写主体实现前形成可引用的决策记录。
+> **状态**：方向已接受，细节征求意见  
+> **目标**：用最短、最真实的一条纵向链路验证核心产品逻辑，而不是在 V1 建设完备框架。
 
 ## TL;DR
 
-我建议把本仓库定义为：
+V1 的定义是：
 
-> 一个面向中文读者、provider-agnostic、evaluation-first 的 Clio-style reference implementation：从非结构化记录中抽取分析 facet，基于 embedding 形成 base clusters，利用 contrastive examples 生成可区分标签，再把 cluster 作为语义单元逐层构建 hierarchy，并只发布通过质量与隐私 gate 的聚合结果。
+> 对一小批中文 AI 对话，只提取 `request` facet，使用一套固定 LLM + embedding + KMeans 配置形成 base clusters；用 representative 与 contrastive examples 生成中文 labels；再对 cluster nodes 重新 embedding，按显式 `k` schedule 逐层聚成 parent nodes；最终输出 `hierarchy.json` 和 `report.md`。
 
-这意味着我们复现的是**公开方法与可观察系统行为**，不是 Anthropic 的内部数据、未公开参数、安全运营流程或产品 UI。
+V1 是 **tracer bullet**：必须穿过真实组件，但只走一条路径。它可以硬编码、可以不通用、可以整批重跑；只要能最快回答“这种聚类与层层抽象是否真的有用”。
 
-完整提案：
+完整决定：
 
-- [RFC 0001：项目章程与边界](../rfcs/0001-project-charter.md)
-- [RFC 0002：评估协议](../rfcs/0002-evaluation-protocol.md)
-- [RFC 0003：架构与 artifact contract](../rfcs/0003-architecture-contracts.md)
-- [RFC 0004：隐私 threat model](../rfcs/0004-privacy-threat-model.md)
-- [生态与相邻系统](../landscape.md)
+- [RFC 0001：V1 Tracer Bullet 项目章程](../rfcs/0001-project-charter.md)
+- [RFC 0002：V1 最小验收协议](../rfcs/0002-evaluation-protocol.md)
+- [RFC 0003：V1 单一路径与最小 Artifact Contract](../rfcs/0003-architecture-contracts.md)
+- [RFC 0004：V1 数据与安全边界](../rfcs/0004-privacy-threat-model.md)
+- [生态与相邻系统](../landscape.md)——仅作研究参考，不构成 V1 scope。
 
-## 为什么先讨论需求，而不是马上选模型
+## 我们要最快验证什么
 
-“用 embedding 做聚类”不足以定义这个项目，因为以下选择会改变问题本身：
+只有三个核心未知数：
 
-- embed 原文，还是 embed `request/task/failure_mode` facet？
-- 只做 flat clusters，还是构建可解释 parent-child hierarchy？
-- label 只看 cluster 内样本，还是同时看最近邻反例？
-- 所有点强制归类，还是允许 `unassigned` / noise？
-- 中文和英文放在同一语义空间，还是先归一化/翻译？
-- 输出给受信 analyst，还是要公开发布？
-- “准确”指几何紧凑、人工可解释、taxonomy 恢复，还是稳定性？
+1. 中文对话被概括为 `request` 后，embedding 是否能把相似需求放在一起；
+2. cluster 内代表样本加邻近反例，是否能生成准确且可区分的 label；
+3. 把 cluster 的 `title + description` 当作新语义单元继续聚类时，是否真的形成更粗一层的 parent concepts。
 
-如果这些不先落定，很容易做出一个 UI 很像、但语义目标、质量证据和隐私边界都不明确的系统。
+如果这三件事不成立，完整架构、UI、隐私系统和规模优化都没有意义。
 
-## 建议的六条核心不变量
-
-### 1. Facet-conditioned semantic space
-
-同一批数据按 `request`、`task`、`language` 或 `failure_mode` 会形成不同结构。Facet 必须是版本化的一等配置，而不是藏在 prompt 里的字符串。
-
-### 2. 可解释的 base clusters
-
-Base cluster 应内部一致、外部可区分，允许 outlier 和不确定样本；UMAP 的视觉分离不能代替语义评估。
-
-### 3. Contrastive labeling
-
-标签生成同时使用 cluster 内代表样本和最近邻 cluster 的 hard negatives，避免产生宽泛、重复的标题。
-
-### 4. 真正的 bottom-up hierarchy
-
-“层层递增”不是在 raw points 上分别运行 `k=1000/100/10`，而是：
+## V1 最短路径
 
 ```text
-base cluster
-  -> parent proposal
-  -> parent dedup
-  -> child-to-parent assignment
-  -> parent relabel from final children
-  -> repeat
+100–300 条中文 demo conversations
+  -> 一句 request facet
+  -> request embeddings
+  -> fixed-k KMeans leaves
+  -> representative + contrastive labeling
+  -> embed leaf title + description
+  -> fixed-k parent clustering
+  -> relabel parents
+  -> hierarchy.json + report.md
 ```
 
-V1 先用 tree：每个 child 最多一个 parent。
+示例 config：
 
-### 5. Privacy gate 是发布路径的一部分
+```yaml
+seed: 42
+leaf_k: 8
+hierarchy_k: [3, 1]
+representatives: 5
+contrastive: 3
+```
 
-Embedding、摘要和聚类都不等于匿名化。Raw、derived、release artifacts 必须分区；public release 在缺少 actor evidence、阈值、审计或人工 review 时应 fail closed。
+这不是最终默认参数，只是让第一颗 tracer bullet 穿过整条链路。
 
-### 6. 每个 run 可复现、可比较
+## V1 In scope
 
-记录 dataset/config fingerprint、seed、code revision、models、prompts、参数、成本、warnings、quality 和 privacy metrics。
+- 单一 conversation JSONL；
+- 单一中文 synthetic / public demo；
+- 单一 `request` facet；
+- 一套可工作的 LLM 与 embedding；
+- 一种 KMeans baseline；
+- leaf labels；
+- 至少一层 parent hierarchy；
+- JSON / Markdown artifacts；
+- 最小 ARI/NMI 与 hierarchy invariants；
+- 一次轻量人工 label / parent review；
+- run config、seed、model、time、cost 记录。
 
-## 建议的 V1 In scope
+## V1 Out of scope
 
-- Batch pipeline；
-- conversation JSONL canonical input；
-- 中文、英文、中英混合 benchmark；
-- pluggable LLM / embedding / clusterer；
-- paper-like KMeans baseline；
-- 至少一个 alternative baseline；
-- contrastive labels；
-- bottom-up hierarchy；
-- run manifest、cache、checkpoint、resume；
-- quality/stability/privacy evaluation；
-- tree/report artifacts；
-- 可选轻量 explorer。
+- 通用 adapter、plugin system 和稳定 API；
+- 多 provider、local/cloud 双栈；
+- alternative clusterer、自动选 `k` 和全面 ablation；
+- `unassigned`、noise handling 和复杂 repair；
+- 多语言 benchmark；
+- cache、checkpoint、resume、streaming 和大规模运行；
+- UMAP、interactive explorer 和 UI clone；
+- 私有生产数据、public-release system 和完整 privacy auditor；
+- 形式化 anonymity / differential privacy；
+- 生产级 SaaS、RBAC、RAG、knowledge graph 或自动处置。
 
-## 建议的 V1 Out of scope
+这些不是“永远不做”，而是不能阻塞第一条真实链路。
 
-- Anthropic UI 的 pixel-perfect clone；
-- 实时流处理；
-- 生产级 multi-tenant SaaS；
-- raw conversation search/review tool；
-- 通用 RAG / knowledge graph；
-- foundation model training；
-- 自动执法、自动封禁或个体绩效判断；
-- 未实现的 differential privacy / k-anonymity 声明；
-- “适用于所有领域”的固定 ontology；
-- 用一个聚类分数代表全部质量。
+## Definition of Done
 
-## “准确”的建议定义
+- 一条命令完成所有 stage；
+- 没有 mock cluster 或 mock hierarchy；
+- 每条记录恰好进入一个 leaf，并能沿 parent path 到 root；
+- 至少两层语义结构，node count 逐层减少，无 cycle/orphan；
+- demo leaf clustering 达到最低 ARI/NMI sanity floor；
+- 至少 80% leaf labels 通过 faithfulness / specificity / distinctiveness review；
+- 至少 80% parent nodes 通过 fit review；
+- `report.md` 默认不含原始对话；
+- 运行信息足以复盘下一步该优化哪里。
 
-不使用单一指标。至少分别验证：
+## 当前需要决定的事项
 
-1. facet faithfulness；
-2. embedding neighborhood quality；
-3. base cluster quality；
-4. label faithfulness / specificity / distinctiveness；
-5. parent-child fit 和 sibling duplication；
-6. end-to-end taxonomy/distribution reconstruction；
-7. seed/model stability；
-8. 中文/英文 parity；
-9. privacy leakage；
-10. latency/cost。
+### D1. Demo 数据
 
-[RFC 0002](../rfcs/0002-evaluation-protocol.md) 给出了一组 provisional gates。它们是工程起点，不是对 Clio 论文数字的直接复制。
+建议：先做 `100–300` 条中文 synthetic conversations，约 `6–12` 个 leaf topics、`2–4` 个 parent topics。
 
-## 隐私措辞建议
+要决定：主题设计和数据量，而不是先找大规模真实数据。
 
-在完整部署证据出现前，仓库使用：
+### D2. 单一模型栈
 
-- `privacy-oriented`；
-- “具有 defense-in-depth privacy controls”；
-- “在给定 policy 与 benchmark 下减少泄露”。
+建议：选择一套当前最容易跑通、中文效果足够的 LLM + embedding。
 
-避免默认声称：
+要决定：第一套工作配置。V1 不要求 provider abstraction。
 
-- 匿名化；
-- 绝对安全；
-- embedding 后无法还原；
-- 与 Anthropic 内部系统具有相同保证。
+### D3. 显式 `k` schedule
 
-## 需要本帖决定的事项
+建议：demo config 直接写 `leaf_k` 和 `hierarchy_k`，例如 `8 -> 3 -> 1`。
 
-请对下面每项给出 `接受 / 修改 / 反对`，并说明原因。
+要决定：第一份 demo 的 schedule。自动选 `k` 后移。
 
-### D1. 复现对象
+### D4. Label sample 数量
 
-接受“method/behavior reproduction，而不是 exact product reproduction”吗？
+建议：每个 cluster 取 `5` 个 representatives 和 `3` 个 contrastive examples。
 
-### D2. V1 输入边界
+要决定：是否足够覆盖主要语义，同时保持 prompt 简单。
 
-建议：核心只保证 conversation JSONL；generic text adapter 作为 experimental。
+### D5. 最低 sanity floor
 
-### D3. 默认 assignment
+建议：ARI `>= 0.45`、NMI `>= 0.60`、top-level accuracy `>= 0.75`，leaf/parent 人工 pass rate `>= 0.80`。
 
-建议：默认允许低置信样本进入 `unassigned`；另提供 `paper_baseline_forced` 做 ablation。
+这些只是发现明显失败的下限，不是产品 KPI。
 
-### D4. Base baseline
+### D6. 输出
 
-建议：先实现 paper-like KMeans pipeline，再增加 density/balanced/hierarchical alternative，而不是一开始争论唯一最优算法。
+建议：V1 只做 `hierarchy.json` 与 `report.md`，不做 UI。
 
-### D5. 中文策略
+要决定：Markdown tree 是否足够让我们判断下一步。
 
-建议：默认 report/labels 为 `zh-CN`，code/API 为英文；representation language 通过 benchmark 决定，不强行固定为中文或英文 pivot。
+## 暂时不要在本帖解决
 
-### D6. Public-release mode
+除非它直接阻塞 tracer bullet，否则先不要展开：
 
-建议：V1 包含 contract 和 fail-closed gate；即使 UI 尚未完成，也不能把 privacy 当后续功能。
+- 哪个 clusterer 长期最好；
+- 完整 component interface；
+- 任意数据 schema；
+- 多语言 parity；
+- 生产 privacy architecture；
+- explorer 技术栈；
+- 大规模性能；
+- SaaS 与权限系统。
 
-### D7. Provisional quality gates
+这些讨论应由第一份真实 artifacts 和 failure report 驱动。
 
-是否接受 RFC 0002 的门槛作为 M1/M2 起点，并允许在实验后通过 RFC 调整？
-
-### D8. Explorer 优先级
-
-建议：先稳定 artifacts 与 evaluation，再构建 explorer；M1 不要求 pixel-level 完整 UI。
-
-## 建议的回复模板
+## 建议回复模板
 
 ```markdown
 ### 总体意见
 接受 / 修改后接受 / 反对
 
-### 各项决定
-- D1：
-- D2：
-- D3：
-- D4：
-- D5：
-- D6：
-- D7：
-- D8：
+### Tracer bullet 选择
+- D1 Demo 数据：
+- D2 单一模型栈：
+- D3 k schedule：
+- D4 sample 数量：
+- D5 sanity floor：
+- D6 输出：
 
-### 最大风险
+### 这条链路最可能先失败在哪里？
 
-### 建议补充的 use case / non-goal
+### 哪一项可以进一步删掉？
 
-### 能接受的 M1 最小交付
+### 哪一项虽然重要，但应明确后移？
 ```
 
 ## Decision log
 
-> 在形成共识后，把最终决定写回 RFC，并在此保留日期、决定、理由和 dissent。
-
 | 日期 | 决定 | 理由 | 状态 |
 |---|---|---|---|
-| 2026-09-20 | 提交初稿 | 先明确目标、边界和验收，再开始实现 | Proposed |
+| 2026-09-20 | 初稿采用 specification-first 完整边界 | 试图一次定义 target-state | Superseded |
+| 2026-09-20 | V1 改为 tracer bullet | 最快最简验证 embedding clustering 与 recursive hierarchy | Accepted |
+| 2026-09-20 | 多 backend、完整 evaluation/privacy/UI 后移 | 不应阻塞第一条真实链路 | Accepted |
