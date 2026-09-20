@@ -1,83 +1,87 @@
-name: RFC / 需求与设计讨论
-description: 用于讨论项目目标、边界、架构、评估协议和重要设计决策
-title: "[RFC] "
+name: Tracer Bullet / 设计决策
+description: 用最短路径验证一个高风险假设，并明确哪些完整性要求暂时后移
+title: "[Decision] "
 body:
   - type: markdown
     attributes:
       value: |
-        感谢发起讨论。本仓库以中文为主，接受必要的英文术语。
+        本仓库以中文为主，接受必要的英文术语。
 
-        请优先描述“要解决的决策”和“明确不解决什么”，不要只给出某个库、模型或 UI 截图。
+        V1 采用 tracer-bullet 思路：优先写清楚“要最快验证什么”“最短真实链路是什么”“什么不做”，而不是先设计完整平台。
 
   - type: textarea
-    id: decision
+    id: hypothesis
     attributes:
-      label: 需要决定什么？
-      description: 用一到三句话写出本帖希望形成的决定。
-      placeholder: 例如：V1 是否允许 unassigned，还是所有记录必须强制进入某个 cluster？
+      label: 要验证的高风险假设
+      description: 用一到三句话说明，如果这个假设不成立，后续大量工程都会失去意义。
+      placeholder: 例如：把中文 request facet 做 embedding 后，是否能形成语义一致的 base clusters？
     validations:
       required: true
 
   - type: textarea
-    id: context
+    id: shortest_path
     attributes:
-      label: 背景与问题
-      description: 当前行为、用户需求、数据规模、已知限制，以及为什么现在需要这个决定。
-    validations:
-      required: true
-
-  - type: textarea
-    id: proposal
-    attributes:
-      label: 提案
-      description: 描述建议方案、关键术语、输入输出和默认行为。
-    validations:
-      required: true
-
-  - type: textarea
-    id: boundaries
-    attributes:
-      label: 边界 / Non-goals
-      description: 明确哪些内容不在本提案范围内，哪些承诺不能由本提案推出。
+      label: 最短真实链路
+      description: 写出从真实输入到真实输出的最少 stage。允许固定配置，但不能用 mock 结果绕过核心风险。
       placeholder: |
-        In scope:
-        - ...
-
-        Out of scope:
-        - ...
+        input JSONL
+          -> one facet
+          -> embedding
+          -> clustering
+          -> labels
+          -> hierarchy.json
     validations:
       required: true
 
   - type: textarea
-    id: alternatives
+    id: done
     attributes:
-      label: 替代方案与 trade-offs
-      description: 至少列出一个替代方案，以及质量、隐私、复杂度、成本和可维护性的差异。
+      label: 最小完成条件
+      description: 只写能判断“方向值得继续”的 smoke criteria，不要把完整产品 KPI 塞进来。
+      placeholder: |
+        - 一条命令跑通
+        - 至少两层 hierarchy
+        - 没有丢记录或 cycle
+        - 通过最低 clustering / 人工 label sanity check
     validations:
       required: true
 
   - type: textarea
-    id: evaluation
+    id: non_goals
     attributes:
-      label: 如何验证？
-      description: 写出数据集、指标、人工 rubric、失败条件和可复现实验。
-      placeholder: 不接受“看起来合理”或“UMAP 很漂亮”作为唯一验证。
+      label: 明确不做 / 后移
+      description: 列出会增加横向完备性、但不直接回答当前假设的内容。
+      placeholder: |
+        - 多 provider abstraction
+        - alternative clusterer
+        - 完整 UI
+        - 生产 privacy system
     validations:
       required: true
 
   - type: textarea
-    id: privacy
+    id: simplifications
     attributes:
-      label: 隐私与滥用边界
-      description: 说明 raw/derived/release data、访问者、发布模式和 fail-closed 条件；不适用时说明理由。
+      label: V1 接受哪些简化？
+      description: 例如固定 k、单一模型、整批重跑、单一 schema、硬编码 demo config。
     validations:
       required: true
 
   - type: textarea
-    id: rollout
+    id: safety
     attributes:
-      label: 最小交付与 rollout
-      description: 描述最小 vertical slice、兼容性、迁移、回滚和 stop condition。
+      label: 数据与安全边界
+      description: 说明这条 tracer bullet 允许使用什么数据、禁止使用什么数据，以及输出不能包含什么。
+      placeholder: 例如：只用 synthetic / public demo data；report 不含 raw conversations；不作匿名化声明。
+    validations:
+      required: true
+
+  - type: textarea
+    id: next_decision
+    attributes:
+      label: 跑完后将根据什么结果决定下一步？
+      description: 把可能的 failure mode 映射到下一项投入，避免预先承诺完整 roadmap。
+      placeholder: 例如：若 leaf clustering 差，先研究 facet/embedding；若 parent fit 差，再研究 hierarchy algorithm。
     validations:
       required: true
 
@@ -86,11 +90,11 @@ body:
     attributes:
       label: 提交前检查
       options:
-        - label: 我已经区分 requirement、implementation choice 与 product UI。
+        - label: 这条路径穿过真实组件，没有用 mock 输出绕过核心风险。
           required: true
-        - label: 我已经写明 in-scope 和 out-of-scope。
+        - label: 我已经写明最小完成条件和明确 non-goals。
           required: true
-        - label: 我已经给出可验证的 acceptance criteria。
+        - label: 我没有因为“未来可能需要”而提前加入抽象层。
           required: true
         - label: 我没有把 embedding、摘要或聚类直接等同于匿名化。
           required: true

@@ -1,663 +1,357 @@
-# RFC 0003：架构与 Artifact Contract
+# RFC 0003：V1 单一路径与最小 Artifact Contract
 
-- **状态**：Draft
+- **状态**：Accepted for V1
 - **日期**：2026-09-20
 - **依赖**：[RFC 0001](0001-project-charter.md)、[RFC 0002](0002-evaluation-protocol.md)
 
-## 摘要
+## 0. 决定
 
-本 RFC 定义的是系统边界和组件 contract，而不是绑定某个框架。
+V1 不建设通用 pipeline framework。
 
-核心目标是让 LLM、embedding、clusterer、hierarchizer、privacy gate 和 UI 可以独立替换，同时保证同一个 run 可恢复、可审计、可比较。任何实现都必须通过版本化 artifact 交换数据，避免把整个 pipeline 写成只能按一种模型、一个 notebook 或一个 UI 运行的脚本。
-
-## 1. Trust zones
-
-系统至少划分三个 zone。
-
-### Zone A：Raw data plane
-
-包含：
-
-- 原始 records / conversations；
-- 直接标识符；
-- actor mapping；
-- 原始 metadata；
-- 可能包含敏感内容的 provider request/response；
-- 可逆映射与调试日志。
-
-默认权限：最严格。不得被 explorer 或 public report 直接读取。
-
-### Zone B：Derived analysis plane
-
-包含：
-
-- normalized records；
-- facet values；
-- embeddings；
-- cluster assignments；
-- representative sample IDs；
-- candidate labels；
-- hierarchy candidates；
-- stage-level evaluation。
-
-这些内容仍可能泄露原始信息，因此不是天然“安全区”。
-
-### Zone C：Analyst-visible / release plane
-
-包含通过 policy gate 的：
-
-- cluster title / description；
-- aggregate counts 和比例；
-- hierarchy；
-- 经过批准的时间、语言或 metadata aggregation；
-- quality/privacy warnings；
-- 可发布 report 和 explorer data。
-
-从 Zone A/B 到 Zone C 必须经过明确的 `PrivacyGate`，不能靠 UI “不显示”代替数据隔离。
-
-## 2. 逻辑 pipeline
+实现先采用一条顺序执行、容易阅读和调试的 Python 路径：
 
 ```text
-SourceAdapter
-  -> Normalizer
-  -> FacetExtractor
-  -> RepresentationBuilder
-  -> EmbeddingBackend
-  -> BaseClusterer
-  -> ClusterLabeler
-  -> Hierarchizer
-  -> PrivacyGate
-  -> Evaluator
-  -> Reporter / Explorer
+load
+  -> extract_request
+  -> embed_requests
+  -> cluster_leaves
+  -> label_leaves
+  -> build_parents
+  -> render_artifacts
 ```
 
-实际执行允许并行、缓存和重试，但 lineage 必须保持可追踪。
+只有当第二种 backend、第二种 schema 或第二种算法真实出现时，才提取 interface。
 
-## 3. 核心数据类型
+## 1. 一条命令
 
-以下为概念 schema；具体实现可以使用 Pydantic、dataclass、Arrow 或其他工具。
+目标调用形态：
 
-### 3.1 CanonicalRecord
-
-```python
-class CanonicalRecord:
-    record_id: str
-    actor_id: str | None
-    timestamp: datetime | None
-    content: RecordContent
-    metadata: dict[str, JsonValue]
-    source: SourceRef
+```bash
+uv run mcm run \
+  --input data/demo.zh.jsonl \
+  --config configs/tracer.yaml \
+  --output runs/demo
 ```
 
-约束：
+具体 CLI 名称可以调整，但必须保持：
 
-- `record_id` 在 dataset version 内唯一且稳定；
-- `actor_id` 必须是稳定 pseudonym，不应直接使用 email / phone / account name；
-- `content` 可以是 messages 或 generic text blocks；
-- metadata 字段必须在 config 中 allowlist；
-- raw content 不得写入 release artifacts。
+- 输入、配置和输出位置显式；
+- 一条命令跑完整链路；
+- 失败返回非零 exit code；
+- 中间 artifacts 保留下来，方便定位最早失败阶段。
 
-### 3.2 FacetDefinition
+## 2. 最小输入 contract
 
-```python
-class FacetDefinition:
-    name: str
-    question: str
-    output_schema: JsonSchema
-    representation_template: str
-    extraction_policy: str
-    representation_language: str
-    display_language: str
-    version: str
-```
-
-Facet 是一等公民，不能只是 prompt 文件中的隐含字符串。
-
-### 3.3 FacetRecord
-
-```python
-class FacetRecord:
-    record_id: str
-    facet_name: str
-    value: JsonValue | None
-    representation_text: str | None
-    confidence: float | None
-    status: Literal["ok", "missing", "refused", "error", "filtered"]
-    provenance: ModelCallRef
-```
-
-### 3.4 ClusterNode
-
-```python
-class ClusterNode:
-    cluster_id: str
-    level: int
-    title: str
-    description: str
-    child_ids: list[str]
-    member_count: int
-    unique_actor_count: int | None
-    representative_ids: list[str]       # Zone B only
-    contrastive_ids: list[str]           # Zone B only
-    centroid_ref: ArtifactRef | None
-    label_provenance: ModelCallRef
-    quality: dict[str, float]
-    privacy_status: str
-```
-
-Release serialization 必须删除所有被 policy 禁止的字段。
-
-### 3.5 Hierarchy
-
-```python
-class Hierarchy:
-    root_ids: list[str]
-    nodes: dict[str, ClusterNode]
-    depth: int
-    stop_reason: str
-    assignment_policy: str
-    version: str
-```
-
-V1 要求：
-
-- 每个 non-root child 最多一个 parent；
-- 不允许 cycle；
-- 每一层节点数原则上减少；
-- 所有叶节点可追溯到 base cluster；
-- `unassigned` 必须显式表示，不得静默丢失。
-
-## 4. 组件接口
-
-## 4.1 SourceAdapter
-
-职责：读取外部数据并生成 canonical records。
-
-```python
-class SourceAdapter(Protocol):
-    def scan(self, source: SourceConfig) -> Iterator[CanonicalRecord]: ...
-    def fingerprint(self, source: SourceConfig) -> DatasetFingerprint: ...
-```
-
-不负责：facet extraction、脱敏承诺、clustering。
-
-V1 必须提供：
-
-- canonical JSONL adapter；
-- conversation JSONL example adapter；
-- generic text adapter 可以是 experimental。
-
-## 4.2 Normalizer
-
-职责：
-
-- schema validation；
-- Unicode / whitespace normalization；
-- deterministic filtering；
-- metadata allowlist；
-- actor pseudonymization hook；
-- size/token limits；
-- duplicate detection。
-
-所有删除、截断和过滤都必须写入 reason code。
-
-## 4.3 FacetExtractor
-
-```python
-class FacetExtractor(Protocol):
-    async def extract(
-        self,
-        records: Sequence[CanonicalRecord],
-        facet: FacetDefinition,
-        context: RunContext,
-    ) -> Sequence[FacetRecord]: ...
-```
-
-要求：
-
-- structured output；
-- async batching；
-- per-record retry；
-- idempotent cache key；
-- prompt/schema/model provenance；
-- 失败隔离，不能因单条 bad record 中止整个 run。
-
-## 4.4 RepresentationBuilder
-
-职责：从 facet value 构建 embedding 输入。
-
-它必须显式区分：
-
-- source-language representation；
-- normalized display text；
-- optional English pivot；
-- concatenated multi-facet representation；
-- missing-value behavior。
-
-## 4.5 EmbeddingBackend
-
-```python
-class EmbeddingBackend(Protocol):
-    async def embed(
-        self,
-        texts: Sequence[str],
-        context: RunContext,
-    ) -> EmbeddingBatch: ...
-```
-
-manifest 必须记录：
-
-- provider / model / revision；
-- dimensions；
-- normalization；
-- distance metric；
-- batching；
-- truncation；
-- cache key；
-- provider retention policy 的用户配置说明。
-
-## 4.6 BaseClusterer
-
-```python
-class BaseClusterer(Protocol):
-    def fit_predict(
-        self,
-        embeddings: EmbeddingMatrix,
-        records: Sequence[FacetRecord],
-        config: ClusterConfig,
-    ) -> BaseClusteringResult: ...
-```
-
-输出必须包含：
-
-- assignment；
-- `unassigned` / noise；
-- centroid 或 medoid；
-- cluster size；
-- confidence / distance（算法允许时）；
-- seed；
-- stop/warning；
-- algorithm-specific diagnostics。
-
-### Paper-like baseline
-
-V1 的 paper-like baseline 应保持方法结构，而不是声称精确复制未知参数：
-
-- facet representation；
-- sentence embedding；
-- large-`k` KMeans；
-- minimum aggregation thresholds；
-- cluster-level contrastive labeling。
-
-精确 embedding model、`k` 和 thresholds 由 benchmark config 决定并完整记录。
-
-### Alternative baseline
-
-至少实现或集成一种：
-
-- HDBSCAN / density-based；
-- balanced hierarchical clustering；
-- agglomerative clustering；
-- topic-model baseline。
-
-Alternative 必须使用同一 input/output contract，才能公平比较。
-
-## 4.7 RepresentativeSampler
-
-职责：为 labeler 选择 cluster 内代表样本和邻近反例。
-
-策略必须版本化，例如：
-
-- nearest-to-centroid；
-- diversity-aware sampling；
-- stratified by language/time；
-- nearest-outside-cluster hard negatives；
-- random sample with fixed seed。
-
-不能默认把所有成员发送给 LLM。
-
-## 4.8 ClusterLabeler
-
-```python
-class ClusterLabeler(Protocol):
-    async def label(
-        self,
-        members: Sequence[LabelExample],
-        contrastive: Sequence[LabelExample],
-        policy: LabelPolicy,
-        context: RunContext,
-    ) -> ClusterLabel: ...
-```
-
-输出：
-
-- concise title；
-- description；
-- optional distinguishing traits；
-- uncertainty / warnings；
-- provenance。
-
-禁止：
-
-- 生成成员不支持的因果解释；
-- 复制 direct identifiers；
-- 根据单个罕见样本命名整个 cluster；
-- 把安全、意图或用户属性判断包装成事实。
-
-## 4.9 Hierarchizer
-
-```python
-class Hierarchizer(Protocol):
-    async def build(
-        self,
-        base_clusters: Sequence[ClusterNode],
-        config: HierarchyConfig,
-        context: RunContext,
-    ) -> Hierarchy: ...
-```
-
-### Clio-style semantic hierarchy 参考流程
-
-```text
-current = base_clusters
-level = 0
-
-while not stop(current, level, config):
-    node_embeddings = embed(title + description for node in current)
-    neighborhoods = partition_for_context_window(node_embeddings)
-
-    candidate_parents = []
-    for neighborhood in neighborhoods:
-        nearby_outside = nearest_nodes_outside(neighborhood)
-        candidate_parents += propose_parents(
-            children=neighborhood,
-            contrastive=nearby_outside,
-        )
-
-    parents = deduplicate(candidate_parents)
-    assignments = assign_each_child(
-        children=current,
-        candidate_parents=parents,
-        allow_unassigned=config.allow_unassigned,
-    )
-
-    parents = relabel_from_final_children(parents, assignments)
-    validate_tree(parents, assignments)
-    current = parents
-    level += 1
-```
-
-### Stop policy
-
-Stop condition 必须可解释，可由以下信号组合：
-
-- target root count；
-- maximum depth；
-- minimum compression ratio；
-- minimum members per parent；
-- parent-child quality estimate；
-- duplicate rate；
-- no-valid-merge；
-- budget limit。
-
-`stop_reason` 是必填 artifact。
-
-### Assignment modes
-
-- `paper_baseline_forced`：每个 child 必须进入某个 parent；
-- `quality_first`：低置信 child 可进入 `unassigned`；
-- `strict_tree`：最终所有 base clusters 必须到达 root，可在独立 repair stage 处理。
-
-默认建议 `quality_first`；用于 paper-like ablation 时选择 forced mode。
-
-## 4.10 PrivacyGate
-
-```python
-class PrivacyGate(Protocol):
-    async def evaluate(
-        self,
-        candidate: ReleaseCandidate,
-        policy: PrivacyPolicy,
-        context: RunContext,
-    ) -> PrivacyDecision: ...
-```
-
-返回：
-
-- `allow` / `redact` / `suppress` / `manual_review`；
-- reason codes；
-- triggered rules；
-- model/detector provenance；
-- audit score；
-- redacted release payload。
-
-PrivacyGate 必须作用于实际 release serialization，而不是只生成一份旁路报告。
-
-## 4.11 Evaluator
-
-Evaluator 读取阶段 artifacts，而不是重新运行隐含 pipeline。
-
-```python
-class Evaluator(Protocol):
-    def evaluate(self, run: RunArtifacts, benchmark: BenchmarkSpec) -> EvaluationReport: ...
-```
-
-所有 metric 都应携带：
-
-- metric name/version；
-- population/subset；
-- sample count；
-- confidence interval（适用时）；
-- missing/excluded records；
-- evaluator provenance。
-
-## 4.12 Reporter / Explorer
-
-Reporter 和 Explorer 只能读取 release profile 允许的 artifacts。
-
-UI 不得：
-
-- 从浏览器端隐藏但仍下载 raw content；
-- 假定 cluster ID 永远稳定；
-- 把 UMAP 坐标当成 ground-truth geometry；
-- 在没有 warning 的情况下展示被 suppression 的 cluster；
-- 绕过 privacy gate 加载代表样本。
-
-## 5. Run artifact contract
-
-建议目录：
-
-```text
-runs/<run_id>/
-  run_manifest.json
-  run_events.jsonl
-  run_warnings.jsonl
-  config.resolved.yaml
-  provenance/
-    code.json
-    models.json
-    prompts.json
-    dataset.json
-  private/
-    records.parquet
-    actor_map.enc              # optional, external key management
-  derived/
-    facets/<facet>.parquet
-    embeddings/<facet>.f16.npy
-    embeddings/<facet>.index.json
-    base_assignments.parquet
-    representatives.jsonl
-    clusters.base.jsonl
-    clusters.level-01.jsonl
-    clusters.level-02.jsonl
-    hierarchy.internal.json
-  privacy/
-    stage_audit.jsonl
-    release_decisions.jsonl
-    privacy_report.json
-  evaluation/
-    metrics.json
-    annotations.jsonl          # if permitted
-    evaluation_report.md
-  release/
-    clusters.jsonl
-    hierarchy.json
-    aggregates.parquet
-    explorer.json
-    report.md
-```
-
-实现可以调整格式，但语义 contract 必须版本化。
-
-## 6. Run manifest 最小字段
+V1 只接受 conversation JSONL：
 
 ```json
 {
-  "schema_version": "1.0",
-  "run_id": "...",
-  "created_at": "...",
-  "status": "completed|partial|failed",
-  "code_revision": "git-sha",
-  "dataset_fingerprint": "...",
-  "config_fingerprint": "...",
-  "random_seeds": {},
-  "models": [],
-  "prompts": [],
-  "stages": [],
-  "artifacts": [],
-  "cost": {},
-  "warnings": [],
-  "release_profile": "private-analysis|public-release|research-public-data"
+  "id": "conv-001",
+  "messages": [
+    {"role": "user", "content": "帮我写一个 Python 脚本整理 CSV"},
+    {"role": "assistant", "content": "..."}
+  ],
+  "gold_leaf": "csv-data-processing",
+  "gold_parent": "programming"
 }
 ```
 
-要求：
+规则：
 
-- manifest 在 run 开始时创建、执行中增量更新；
-- partial run 仍保留完整状态；
-- resume 前验证 dataset/config fingerprint；
-- 不允许在不留记录的情况下复用不同模型产生的 cache。
+- `id` 必填、稳定、唯一；
+- `messages` 必填；
+- `gold_leaf` / `gold_parent` 仅 demo benchmark 使用，真实输入可以省略；
+- V1 不支持 generic text、工单、数据库 adapter 或任意 metadata schema；
+- 输入 validation 只检查当前 pipeline 真正需要的字段。
 
-## 7. Cache 与 checkpoint
+## 3. 最小配置
 
-Cache key 至少包含：
+示例：
 
-- canonical input hash；
-- component name/version；
-- model/provider/revision；
-- prompt/schema version；
-- relevant config；
-- representation language；
-- privacy mode。
+```yaml
+seed: 42
 
-Checkpoint 必须是 stage-level 和 batch-level 可恢复的。
+facet:
+  name: request
+  language: zh-CN
 
-以下变化默认使 cache 失效：
+models:
+  llm: one-working-model
+  embedding: one-working-embedding-model
 
-- prompt 或 output schema 变化；
-- model revision 变化；
-- normalization policy 变化；
-- privacy policy 变化；
-- input content 变化；
-- embedding dimensions/normalization 变化。
+clustering:
+  leaf_k: 8
+  hierarchy_k: [3, 1]
 
-## 8. ID 与版本策略
+sampling:
+  representatives: 5
+  contrastive: 3
 
-- `record_id` 来自 source 或 deterministic mapping；
-- `cluster_id` 是 run-scoped，不承诺跨 run 稳定；
-- 跨 run 对比通过 cluster matching artifact 完成；
-- node title 不是 ID；
-- schema、component、prompt、policy 必须独立版本化；
-- release artifact 应携带 `run_id` 和 `schema_version`。
+output:
+  include_raw_text_in_report: false
+```
 
-## 9. 多语言策略
+V1 不实现 config inheritance、provider registry、dynamic model routing 或自动 tuning。
 
-必须把以下概念解耦：
+## 4. 顺序 pipeline
 
-- **source language**：原始记录语言；
-- **representation language**：用于 embedding / clustering 的文本语言；
-- **display language**：cluster labels 和报告语言。
+### 4.1 Load
 
-推荐初始实验矩阵：
+读取 JSONL，检查：
 
-1. multilingual embedding + source-language facet；
-2. multilingual embedding + normalized Chinese/English label；
-3. English pivot facet + multilingual/source display；
-4. separate-by-language clustering + cross-language parent merge。
+- JSON 可解析；
+- `id` 唯一；
+- `messages` 非空；
+- 至少存在一条 user message。
 
-在 benchmark 结束前不把其中任意一种写死为“正确方案”。默认 display language 可设为 `zh-CN`，但必须保留原语言证据和 provenance。
+输出内存中的 records 和 input fingerprint。
 
-## 10. Edge cases
+### 4.2 Extract request facet
 
-### Tiny datasets
+固定问题：
 
-- 少于配置的 minimum records 时拒绝构建 hierarchy；
-- 返回 reasoned report，而不是生成看似完整的三层树；
-- 允许只做 facet / neighborhood exploration。
+> 用户希望助手完成什么？请用一句简洁中文概括，不要复述无关细节。
 
-### Multi-topic records
+每条记录输出：
 
-V1 主 contract 为 single primary assignment，但必须标记 `multi_topic_suspected`。Multi-label clustering 作为后续 RFC，不在 V1 核心路径内。
+```json
+{
+  "id": "conv-001",
+  "request": "编写脚本整理 CSV 数据",
+  "status": "ok"
+}
+```
 
-### Outliers
+V1 可以顺序或简单 batch 调用。单条失败可以重试一次；仍失败则整个 demo run 标记失败，不实现复杂隔离队列。
 
-- 不强制把所有点放入正常 cluster；
-- outlier 不应直接以原始内容出现在 release report；
-- 大量 outliers 是诊断信号，不应静默丢弃。
+### 4.3 Embed requests
 
-### Failed model calls
+只对 `request` 文本生成 embedding。
 
-- per-record/batch error isolation；
-- bounded retries；
-- failure reason；
-- partial run；
-- downstream stage 明确处理 missing facets。
+记录：
 
-### Duplicate records
+- embedding model；
+- dimensions；
+- normalization（如有）；
+- distance metric；
+- 输入顺序和 record IDs。
 
-- exact duplicate 和 near-duplicate 分开报告；
-- 默认不让重复内容人为放大 cluster prevalence；
-- 是否 deduplicate 必须写入 config 和 report。
+V1 不建立 `EmbeddingBackend` protocol。
 
-### Temporal drift
+### 4.4 Cluster leaves
 
-V1 不做实时 incremental clustering，但 artifacts 必须允许按时间切片比较。跨时间的 cluster matching 是 evaluation/reporting 功能，不保证 ID 稳定。
+使用固定 seed 的 KMeans：
 
-## 11. 实现边界
+```python
+assignments = KMeans(
+    n_clusters=config.leaf_k,
+    random_state=config.seed,
+).fit_predict(embeddings)
+```
 
-### Core library 应负责
+V1 不自动选择 `k`，也不处理 noise / `unassigned`。显式 `leaf_k` 是 tracer bullet 的有意简化。
 
-- schemas/contracts；
-- pipeline orchestration；
-- adapters/interfaces；
-- artifacts/provenance；
-- baseline components；
-- evaluation hooks；
-- privacy gate enforcement。
+### 4.5 Select examples
 
-### UI 应负责
+对每个 leaf cluster：
 
-- tree/map rendering；
-- filters；
-- aggregate comparison；
-- warning/display states；
-- shareable view state（不得包含敏感数据）。
+- representatives：选择离 centroid 最近的 `N` 个 request facets；
+- contrastive examples：选择离该 centroid 最近、但属于其他 cluster 的 `M` 个 request facets。
 
-### UI 不应负责
+只把 facet 文本发送给 labeler，不默认发送完整对话。
 
-- 真正的 privacy enforcement；
-- cluster computation；
-- artifact repair；
-- model/provider secrets；
-- raw/derived data access policy。
+### 4.6 Label leaves
 
-## 12. 待讨论事项
+固定 prompt 输入：
 
-1. Artifact 首选 Arrow/Parquet 还是 JSONL-first；
-2. V1 是否需要统一 async runtime；
-3. paper-like baseline 的 default embedding 由复现优先还是中文质量优先决定；
-4. default assignment mode 是否采用 `quality_first`；
-5. hierarchy candidate proposal 是否需要 deterministic non-LLM baseline；
-6. release artifacts 是否允许展示经过批准的 synthetic representative examples；
-7. cluster matching 是否进入 V1 contract；
-8. explorer 是独立 package 还是同一 monorepo workspace。
+- cluster 内 representative facets；
+- cluster 外 contrastive facets；
+- 输出语言和格式要求。
+
+输出：
+
+```json
+{
+  "node_id": "leaf-03",
+  "level": 0,
+  "title": "处理表格与 CSV 数据",
+  "description": "用户要求编写或修改程序来读取、清洗、转换和导出表格数据。",
+  "member_count": 17
+}
+```
+
+V1 不实现多模型 voting、label repair 或独立 judge。
+
+### 4.7 Build hierarchy
+
+对当前层每个 node 构造：
+
+```text
+node_text = title + "。" + description
+```
+
+然后对 node texts embedding，并按 `hierarchy_k` 逐层运行 KMeans。
+
+对于 `leaf_k: 8`、`hierarchy_k: [3, 1]`：
+
+```text
+8 leaf nodes
+  -> 3 parent nodes
+  -> 1 root node
+```
+
+每个 parent 使用最终 children 的标题、描述和数量重新生成 `title + description`。
+
+V1 hierarchy 的必要性质：
+
+- 每个 child 恰好一个 parent；
+- node count 逐层减少；
+- parent 从最终 children relabel；
+- 所有 leaf 都能到达 root；
+- 没有 cycle。
+
+V1 不实现动态 parent proposal、candidate dedup、`unassigned`、repair、DAG 或自动 stop policy。它验证的是“把 cluster node 当作新语义单元继续上卷”这一条主链路。
+
+### 4.8 Render
+
+生成 machine-readable artifacts 和中文 report。
+
+Report 至少包含：
+
+- 数据集与配置摘要；
+- base clustering metrics；
+- hierarchy tree；
+- 每个 node 的 title、description 和 count；
+- 轻量人工 review 表；
+- runtime / token / cost；
+- 已知限制。
+
+## 5. 最小 artifact contract
+
+```text
+runs/<run_id>/
+  run.json
+  facets.jsonl
+  embeddings.npy
+  embedding_index.json
+  leaf_assignments.jsonl
+  nodes.jsonl
+  hierarchy.json
+  metrics.json
+  report.md
+```
+
+### 5.1 `run.json`
+
+```json
+{
+  "run_id": "demo",
+  "status": "completed|failed|failed_sanity",
+  "code_revision": "git-sha",
+  "input_fingerprint": "sha256:...",
+  "config": {},
+  "models": {},
+  "seed": 42,
+  "stages": [],
+  "runtime_seconds": 0,
+  "usage": {},
+  "warnings": []
+}
+```
+
+### 5.2 `facets.jsonl`
+
+每条记录只包含：
+
+- `id`；
+- `request`；
+- `status`；
+- 可选 usage/error metadata。
+
+### 5.3 `leaf_assignments.jsonl`
+
+```json
+{"id":"conv-001","leaf_id":"leaf-03","distance":0.42}
+```
+
+### 5.4 `nodes.jsonl`
+
+每行一个 leaf / parent / root node：
+
+```json
+{
+  "node_id": "parent-01",
+  "level": 1,
+  "title": "编程与数据处理",
+  "description": "...",
+  "child_ids": ["leaf-01", "leaf-03"],
+  "member_count": 34
+}
+```
+
+### 5.5 `hierarchy.json`
+
+```json
+{
+  "root_ids": ["root-00"],
+  "levels": [
+    ["leaf-00", "leaf-01"],
+    ["parent-00", "parent-01"],
+    ["root-00"]
+  ],
+  "edges": [
+    {"child": "leaf-01", "parent": "parent-00"}
+  ]
+}
+```
+
+V1 schemas 可以变化，但每个 breaking change 应与代码一起提交，不需要先建设 schema registry。
+
+## 6. 最小代码组织
+
+建议从小开始：
+
+```text
+src/mcm/
+  cli.py
+  pipeline.py
+  prompts.py
+  artifacts.py
+  metrics.py
+
+tests/
+  test_smoke.py
+  test_hierarchy_invariants.py
+```
+
+允许把多个 stage 写在同一个 `pipeline.py` 中。不要为每个 stage 创建抽象基类、DI container 或 plugin registry。
+
+## 7. V1 不实现的工程能力
+
+- 通用 adapters；
+- backend protocols；
+- database / queue；
+- async job orchestration；
+- cache 与 checkpoint；
+- resume；
+- distributed execution；
+- observability platform；
+- stable artifact versioning；
+- browser UI；
+- public API server；
+- deployment manifests。
+
+如果一次 demo run 已经慢到影响迭代，可以加入最小本地 cache；但它必须由实际痛点驱动，而不是因为完整系统“通常应该有”。
+
+## 8. 演进触发条件
+
+只有出现以下具体事件才增加 abstraction：
+
+- 第二个输入 schema出现：提取 `SourceAdapter`；
+- 第二个 LLM / embedding provider出现：提取 backend interface；
+- 第二个 clusterer出现：统一 result contract；
+- 重跑成本成为瓶颈：增加 cache/checkpoint；
+- 真实私有数据需求出现：启动完整 privacy/release RFC；
+- JSON/Markdown 不足以理解结果：构建 explorer。
+
+在此之前，最简单、最透明的实现优先。
