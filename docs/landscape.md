@@ -3,6 +3,8 @@
 - **调研日期**：2026-09-20
 - **目的**：理解 Clio 之后已有的实现与相邻方法，决定“借什么、不借什么”，而不是重复造一个没有评估标准的 demo。
 
+> **历史研究材料，非当前 V1 规范。** 本文的 provider-agnostic、evaluation-first、完整 contract 等定位已被 [方向修正](https://github.com/thsno02/musical-computing-machine/issues/2#issuecomment-5748955377) 取代，保留作 post-V1 参考。当前范围以 [RFC 0001](rfcs/0001-project-charter.md) 和 [实现 issue #3](https://github.com/thsno02/musical-computing-machine/issues/3) 为准。
+
 ## 1. 先说结论
 
 本项目不应盲目 fork 某一个现有实现，也不应把“用了更新的 embedding / LLM”当作创新。
@@ -280,3 +282,4 @@ GraphRAG 从文档抽取 entities/relations，构建图，进行 hierarchical co
 - BERTopic：<https://maartengr.github.io/BERTopic/>
 - TnT-LLM：<https://arxiv.org/abs/2403.12173>
 - GraphRAG：<https://microsoft.github.io/graphrag/>
+

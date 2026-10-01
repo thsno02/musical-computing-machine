@@ -1,478 +1,233 @@
-# RFC 0002：评估协议——“准确聚类”究竟是什么意思
+# RFC 0002：V1 最小验收协议
 
-- **状态**：Draft
+- **状态**：Accepted for V1
 - **日期**：2026-09-20
 - **依赖**：[RFC 0001](0001-project-charter.md)
 
-## 摘要
+## 0. 目的
 
-本项目拒绝用一个数字概括系统质量。
+V1 的验证目标不是建立完整 benchmark program，而是回答：
 
-Clio-style pipeline 至少包含 facet extraction、semantic representation、base clustering、cluster labeling、hierarchy、privacy gating 和 end-to-end reconstruction。每个阶段可能单独失败，也可能彼此抵消；因此，“准确聚类”必须被定义为一组可测量、可诊断的 properties，而不是某个截图、silhouette score 或 LLM 主观评价。
+> 这条最短 pipeline 是否真的能把一小批中文对话变成一棵大体正确、可读、可追溯的多层聚类树？
 
-本 RFC 定义 benchmark 分层、指标、人工 rubric、ablation、stability protocol 和 V1 provisional gates。
+因此，本 RFC 只定义 tracer bullet 的 smoke criteria。它不证明产品质量，不支持跨模型排名，也不构成隐私、安全或规模保证。
 
-## 1. 评估原则
+## 1. Demo 数据集
 
-### 1.1 指标必须对应决策
+V1 使用一份小型、版本化的中文数据集：
 
-每个指标必须回答一个明确问题：
+- `100–300` 条 AI conversations；
+- 优先 synthetic，或使用明确许可的公开数据；
+- 约 `6–12` 个已知 leaf topics；
+- 约 `2–4` 个已知 parent topics；
+- 包含同义改写和少量 hard negatives；
+- 不包含真实敏感信息；
+- 每条记录具有 `gold_leaf` 和 `gold_parent`，仅用于 sanity check。
 
-- facet 是否保留了分析任务需要的语义？
-- embedding 的局部邻域是否符合人类判断？
-- base cluster 是否内部一致、彼此可区分？
-- label 是否准确、具体且能区分邻居？
-- hierarchy 的 parent 是否真正概括 children？
-- 结果对随机种子、模型和采样是否稳定？
-- 中文与英文是否存在系统性质量差距？
-- analyst-visible output 是否泄露被禁止的信息？
-- 质量提升是否值得增加的调用成本和延迟？
+`gold_leaf` / `gold_parent` 只进入评估：不得发送给 facet extractor / labeler，也不得用于 embedding、clustering、sampling 或 parent grouping。只有评估阶段才能读取 gold，避免把已知答案泄漏进 pipeline。缺少任何 gold 的输入可以用于探索，但不能声称通过本 demo 验收。
 
-### 1.2 无 ground truth 时，不伪造 ground truth
+数据集应足够小，使失败后整条 pipeline 可以直接重跑；也应足够多，使 embedding 和 clustering 不是对十几条样本的玩具展示。
 
-对真实开放世界数据，通常不存在唯一正确 taxonomy。
+## 2. 自动验收
 
-此时应报告：
+### 2.1 Pipeline completion
 
-- 多位标注者的一致性；
-- 多种可接受划分；
-- pairwise / local judgments；
-- stability；
-- cluster usefulness；
-- 失败案例。
+必须满足：
 
-不得把某位研究者写出的 taxonomy 当作宇宙真相。
+- 输入 schema 全部通过；
+- facet extraction、embedding、base clustering、labeling、hierarchy 和 rendering 全部执行；
+- 没有使用预写 cluster 或 mock hierarchy；
+- 失败时命令返回非零状态并保留错误信息。
 
-### 1.3 论文数字不是默认验收线
+### 2.2 Record coverage
 
-公开论文中的结果依赖特定数据、模型、prompt、sampling、threshold 和 evaluation design。除非这些条件足够一致，否则只能作为背景参考，不能把某个 reported accuracy 直接当作本项目“复现成功”的门槛。
+V1 使用 forced assignment，因此：
 
-### 1.4 外部 metric 与人类判断并用
+- 每条记录恰好属于一个 leaf cluster；
+- 不得静默丢失、重复或新增记录；
+- `input_count == assigned_count`；
+- 每个 assignment 可追溯到 `record_id`。
 
-- 仅使用 intrinsic metric，可能奖励几何上紧凑但语义上无用的 cluster；
-- 仅使用 LLM-as-judge，可能受到同源模型偏好和 prompt 敏感性影响；
-- 仅使用人工评审，成本高且难以持续运行。
+### 2.3 Base clustering sanity
 
-因此，V1 采用 deterministic metrics、人工标注、independent judge 和 error analysis 的组合。
+在已知 leaf labels 的 demo 数据上至少报告：
 
-## 2. Benchmark 分层
-
-### 2.1 Layer A：受控 synthetic benchmark
-
-目的：为 end-to-end accuracy、hierarchy、multilingual parity 和 privacy canary 提供已知 ground truth。
-
-每条 synthetic record 至少具有：
-
-- `leaf_topic_id`；
-- `parent_topic_ids`；
-- `language`；
-- `difficulty`；
-- `multi_topic` 标记；
-- `style_variant`；
-- `contains_canary` 与 canary 类型；
-- `actor_id`；
-- 生成器版本和 seed。
-
-必须覆盖：
-
-- 中文；
-- 英文；
-- 中英混合；
-- 同义改写；
-- 长短文本；
-- 相邻但不同的 intent；
-- 单条记录含多个主题；
-- 极少数主题；
-- 无法归类 / outlier；
-- 直接标识符、准标识符和稀有事件描述；
-- 数据分布不均衡。
-
-Synthetic benchmark 不能替代真实数据，只负责回答“系统是否能恢复我们明确植入的结构”。
-
-### 2.2 Layer B：人工 gold set
-
-目的：在非模板化语言上评估实际语义质量。
-
-建议 V1 建立 `300–500` 条记录的版本化 gold set：
-
-- 来源必须允许研究与再发布，或只发布脱敏后的 annotation；
-- 至少 `100` 条中文、`100` 条英文、`100` 条中英混合或多语言样本；
-- 每条记录由至少两位标注者独立判断；
-- disagreement 由第三位 adjudicator 处理，且保留原始 disagreement；
-- 不要求唯一 taxonomy，优先标注 pairwise relation、primary request、acceptable parents 和 label quality。
-
-### 2.3 Layer C：public exploratory corpus
-
-目的：观察开放世界行为、规模、成本和未知 pattern。
-
-例如使用许可合适的公开对话或反馈数据。该层主要报告：
-
-- cluster distribution；
-- label/hierarchy 人工抽检；
-- stability；
-- runtime/cost；
-- privacy warnings；
-- qualitative error taxonomy。
-
-不得在该层凭空计算“真实准确率”。
-
-### 2.4 Layer D：用户私有数据
-
-目的：验证真实部署价值。
-
-该层结果默认不进入公开 benchmark；必须记录：
-
-- 数据使用授权；
-- provider data path；
-- retention；
-- 访问角色；
-- 哪些 artifact 可发布；
-- 哪些评估只能在受控环境中运行。
-
-## 3. 阶段级指标
-
-## 3.1 Facet extraction
-
-### 人工 rubric
-
-每个 facet 输出按以下维度评分：
-
-1. **Faithfulness**：是否被原始记录支持；
-2. **Coverage**：是否包含完成分析所需的主要信息；
-3. **Focus**：是否只回答 facet 问题；
-4. **Abstraction**：是否避免无意义细节，同时没有过度抽象；
-5. **Privacy compliance**：是否移除 policy 禁止的信息；
-6. **Language compliance**：是否符合 representation/display language 策略。
-
-推荐 `0/1/2` 三级评分，并同时报告 pass rate 和平均分。
-
-### 自动指标
-
-- schema validity；
-- missing / refusal / parse-error rate；
-- 长度分布；
-- direct identifier detector hit rate；
-- canary retention rate；
-- 与 gold primary intent 的 exact / semantic match；
-- 重复运行的一致性。
-
-## 3.2 Embedding / neighborhood quality
-
-Embedding 本身不直接给出“聚类准确率”，但可以评估局部邻域：
-
-- `Recall@k`：同一 gold leaf / acceptable pair 是否进入邻居；
-- `MRR`；
-- pairwise AUC；
-- hard-negative retrieval accuracy；
-- language-pair retrieval parity；
-- translation consistency：同一内容的中英版本是否互为近邻；
-- hubness 和 duplicate concentration。
-
-必须至少比较：
-
-- raw text embedding；
-- selected facet embedding；
-- 一个 multilingual embedding baseline；
-- 任何计划作为默认实现的 embedding。
-
-## 3.3 Base clustering
-
-在有 ground truth 的 benchmark 上：
-
-- B-cubed precision / recall / F1；
 - Adjusted Rand Index（ARI）；
 - Normalized Mutual Information（NMI）；
-- pairwise precision / recall / F1；
-- coverage；
-- noise / unassigned rate；
-- cluster size distribution；
-- small-cluster recall；
-- minority-language recall。
+- cluster size distribution。
 
-在开放世界数据上：
+V1 的最低 sanity floor：
 
-- 人工 coherence；
-- nearest-cluster confusion；
-- duplicate-cluster rate；
-- outlier appropriateness；
-- size imbalance；
-- 跨 seed co-assignment stability。
+| Metric | Floor |
+|---|---:|
+| ARI | `>= 0.45` |
+| NMI | `>= 0.60` |
 
-`silhouette`、Davies–Bouldin 等几何指标可以报告，但不得单独决定模型优劣。
+这些数字只用于阻止“pipeline 跑完但 clustering 基本随机”的结果。它们不是最终质量门槛，也不用于宣称复现了论文指标。
 
-## 3.4 Cluster labeling
+### 2.4 Hierarchy invariants
 
-Label 需要独立于 cluster assignment 评估。
+自动检查：
 
-每个 label/description 按以下 rubric：
+- 至少有 leaf 与 parent 两层；
+- 每个 non-root node 恰好一个 parent；
+- 没有 cycle；
+- 每个 leaf 都能到达 root；
+- 每层 node count 严格减少；
+- 恰好一个 root，root 的 `member_count` 等于输入记录数；
+- leaf 的 `member_count` 等于其 assignments 数；parent 的 `member_count` 等于 `sum(child.member_count)`（只计算直接 children）（不重复累加多层 descendants）；
+- 没有 orphan node。
 
-1. **Faithfulness**：由 cluster 内样本支持；
-2. **Coverage**：覆盖主要共同点；
-3. **Specificity**：足够具体，不是“其他问题”“技术相关”；
-4. **Distinctiveness**：能与最近邻 cluster 区分；
-5. **Conciseness**：没有不必要修饰；
-6. **No hallucinated causality**：不添加样本不支持的因果或动机；
-7. **Privacy compliance**；
-8. **Locale quality**：中文表达自然、术语稳定。
+### 2.5 Parent-level sanity
 
-额外指标：
+`top_level_accuracy` 固定评估 **最高的非 root parent 层**，不评估单一 root。在默认 `8 -> 3 -> 1` 中评估的是 3 个 parent。验收 schedule 必须包含至少一层非 root parent；不能只用 `8 -> 1` 规避粗粒度检查。
 
-- sibling title semantic similarity；
-- duplicate / near-duplicate title rate；
-- label-to-member retrieval；
-- label-to-neighbor margin；
-- with-vs-without contrastive examples 的 blind preference。
+对每条输入记录沿 leaf → ancestor 找到该层 parent，以该 parent 下所有原始记录的 `gold_parent` 多数票作为预测；按记录数加权，不按 child node 数投票。并列时按 gold label 的 Unicode 字典序取第一个，记录 mapping 和 evaluated level 到 `metrics.json`。
 
-## 3.5 Hierarchy
+```text
+top_level_accuracy = sum(max_gold_count_in_parent) / input_count
+```
 
-### 有已知 tree 时
+分母为完整 demo 的输入记录数；任何缺失 assignment 或 gold 都是验收失败，不能静默剔除。不同 discovered parents 可以映射到同一 gold label；这是多数映射 sanity check，不是一对一 taxonomy 匹配。
 
-- hierarchical precision / recall / F1；
-- ancestor F1；
-- dendrogram purity；
-- leaf-to-ancestor path accuracy；
-- depth error；
-- parent branching factor distribution。
+V1 floor：
 
-### 开放世界时
+```text
+top_level_accuracy >= 0.75
+```
 
-每条 parent-child edge 评估：
+这只是快速检测 hierarchy 是否与已知粗粒度结构完全背离。
 
-- child 是否属于 parent；
-- parent 是否完整覆盖 child 的核心含义；
-- parent 是否过宽或过窄；
-- siblings 是否处于相似 abstraction level；
-- siblings 是否重复；
-- 是否存在 orphan / forced bad assignment。
+### 2.6 Provenance
 
-系统级指标：
+`run.json` 至少包含：
 
-- parent-child fit pass rate；
-- sibling near-duplicate rate；
-- layer compression ratio；
-- unassigned rate；
-- monotonic node-count violations；
-- depth distribution；
-- stop reason 分布。
+- code revision；
+- input fingerprint；
+- LLM model；
+- embedding model；
+- `leaf_k`；
+- `hierarchy_k`；
+- seed；
+- prompt version；
+- wall-clock time；
+- 可得的 token / cost；
+- stage status。
 
-## 3.6 End-to-end reconstruction
+## 3. 一次轻量人工检查
 
-在 synthetic benchmark 上，把输出 cluster/hierarchy 映射回已知 taxonomy，报告：
+V1 不建立多人标注流程。命令生成空白 review 表，`review_status: pending`；维护者基于本地 artifacts 检查后记录 reviewer、日期、逐项结果、分子/分母和理由。未填写项不能算 pass。`report.md` 只包含符合 RFC 0004 输出边界的 review 内容，受抑制节点的逐项证据留在本地 `metrics.json`，不复制样本到报告。
 
-- overall accuracy；
-- macro-F1；
-- weighted-F1；
-- per-leaf precision/recall；
-- top-level distribution 的 Jensen–Shannon divergence；
-- minority-topic recall；
-- concerning / rare / multilingual subsets；
-- unmapped / ambiguous rate。
+人工检查结束后，填写 `metrics.json` / `report.md` 并同步 `run.json` 的最终状态即可；不要求额外 review 服务或自动 judge。自动运行成功仅代表 pipeline 完成，全部自动 floor、人工 floor 和中文可读性检查都通过后才能声称 V1 验收通过。
 
-映射过程必须保存，并区分：
+### 3.1 Leaf label review
 
-- 自动 semantic mapping；
-- 人工 adjudication；
-- 多对一与一对多映射；
-- 无法映射的 cluster。
+如果 leaf clusters 不超过 20 个，则检查全部；否则用 run seed 从按 `node_id` 排序的列表中无放回抽取 20 个，并记录抽样 ID。检查范围包含 report 中受抑制的 nodes。分母为实际选定的检查数，不能删去不合格或未填写项。
 
-## 3.7 Stability
+每个 label 回答三个 yes/no 问题：
 
-每个候选默认配置至少运行三个 seed，并在可承受时跨 model/provider 运行。
+1. **Faithful**：label 是否由 cluster 内主要样本支持？
+2. **Specific**：是否比“技术问题”“写作相关”更具体？
+3. **Distinct**：是否能与最近邻 cluster 区分？
 
-报告：
+一个 label 三项都为 yes 才算 pass。
 
-- AMI / ARI across runs；
-- pairwise co-assignment agreement；
-- cluster matching 后的 label consistency；
-- top-level distribution variance；
-- hierarchy edge stability；
-- result churn：新增少量数据后已有 records 的重分配比例。
+V1 floor：
 
-“看起来合理但每次完全不同”不是稳定系统。
+```text
+leaf_label_pass_rate >= 0.80
+```
 
-## 3.8 Multilingual quality
+### 3.2 Parent review
 
-至少分组报告：
+检查全部 parent nodes（包含 root；不包含 leaves）：
 
-- 简体中文；
-- 英文；
-- 中英混合；
-- 其他语言（样本足够时）。
+1. children 是否大体属于这个 parent？
+2. parent 是否比 children 更抽象，而不是简单复制某个 child？
+3. sibling parents 是否明显重复？
 
-指标包括：
+第 1、2 项为 yes 且第 3 项为 no 才算 pass；没有 sibling 的节点（含单一 root）第 3 项记 N/A，其余项仍必须通过。`parent_fit_pass_rate = passing_parent_count / total_parent_count`；未填写项不能算 pass。
 
-- facet pass rate；
-- neighborhood Recall@k；
-- B-cubed F1；
-- label quality；
-- hierarchy fit；
-- end-to-end macro-F1；
-- privacy error；
-- 每条记录成本与 token。
+V1 floor：
 
-还需运行 translation invariance test：同一语义的中文、英文和平行改写是否获得相近 facet、邻域和 ancestor path。
+```text
+parent_fit_pass_rate >= 0.80
+```
 
-## 3.9 Privacy evaluation
+### 3.3 中文可读性
 
-详细 threat model 见 RFC 0004。质量协议至少包含：
+维护者确认：
 
-- direct identifier detector recall；
-- synthetic canary extraction / retention / release rate；
-- rare-topic disclosure test；
-- minimum records / unique actors gate coverage；
-- privacy auditor recall，特别是高风险输出；
-- false positive rate；
-- analyst-visible artifacts 的人工抽检；
-- provider/log/cache 中敏感内容路径审计。
+- 标题和描述是自然中文；
+- 没有明显机翻式表达；
+- 英文术语只在必要时保留；
+- 同义 cluster 没有因为中文措辞差异而被误认为不同概念。
 
-隐私结果必须按 pipeline stage 报告，不能只审最终页面。
+V1 不要求正式 locale benchmark。
 
-## 3.10 效率与成本
+## 4. 运行成本
 
-每次 benchmark 记录：
+每次 demo run 记录：
 
 - wall-clock time；
-- records / second；
-- peak memory；
-- LLM calls、tokens 和重试；
-- embedding calls / dimensions；
-- cache hit rate；
-- estimated and actual cost（可得时）；
-- failed / partial records；
-- resume 后重复工作量。
+- LLM calls / tokens；
+- embedding calls；
+- estimated cost（可得时）；
+- stage-level duration。
 
-质量报告应给出 Pareto comparison，而不是把“最贵”自动等同于“最好”。
+V1 不设置成本门槛。记录这些数字的目的，是决定下一个最值得优化的环节。
 
-## 4. V1 provisional gates
+## 5. 失败如何处理
 
-下列门槛用于推动可重复工程，不是永久标准，也不是对论文结果的直接复刻。每次调整必须在 RFC / decision log 中记录。
+任一 floor 未通过时：
 
-| 维度 | V1 provisional gate |
-|---|---:|
-| Facet faithfulness pass rate | `>= 90%` |
-| Facet schema success | `>= 99%`，失败必须可重试/隔离 |
-| Synthetic base clustering B-cubed F1 | `>= 0.80` |
-| Cluster label rubric pass rate | `>= 85%` |
-| Parent-child fit pass rate | `>= 90%` |
-| Sibling near-duplicate rate | `<= 10%` |
-| Synthetic top-level reconstruction accuracy | `>= 85%` |
-| Synthetic end-to-end macro-F1 | `>= 0.80` |
-| 中文与英文 macro-F1 绝对差 | `<= 5` percentage points |
-| 三个 seed 的 cluster AMI | `>= 0.70` |
-| 高风险 privacy examples 的 auditor recall | `>= 98%` |
-| Analyst-visible benchmark 中 direct identifiers | `0` |
-| Run provenance fields | `100%` 完整 |
+1. 仍保存可用的本地 artifacts 和诊断 report；RFC 0004 的输出抑制 / blocked 规则始终优先，不得为了诊断泄露命中文本；
+2. 自动或人工 floor 未通过时标记 `status: failed_sanity`；人工未完成时用 `review_status: pending`，不能当作通过；
+3. 列出最可能的失败阶段；
+4. 只修最靠前、最有解释力的一个问题；
+5. 不通过增加框架层、更多 backend 或更复杂 UI 来掩盖质量问题。
 
-### Gate 解释
+典型决策：
 
-- 不通过某个 gate 不一定意味着实现不可合并，但必须标记为 experimental，并附 failure analysis；
-- privacy gate 不得以“已知问题”方式绕过 public-release；
-- 小样本 confidence interval 必须报告；
-- 同一 benchmark 上反复调参必须记录，避免无意中把 test set 当 training set。
+- ARI/NMI 低：先检查 facet、embedding 和 `leaf_k`；
+- leaf labels 差：检查 representative / contrastive samples 和 prompt；
+- parent fit 差：检查 node representation、`hierarchy_k` 和 parent relabel；
+- 成本太高：再考虑 cache/batching，而不是预先实现完整 job system。
 
-## 5. Ablation matrix
+## 6. 明确后移的评估工作
 
-V1 至少完成以下 ablation：
+以下都不是 V1 blocker：
 
-| 问题 | A | B |
-|---|---|---|
-| Representation | raw text | selected facet |
-| Label context | in-cluster only | in-cluster + contrastive |
-| Base clusterer | paper-like KMeans | alternative clusterer |
-| Assignment | forced | allow `unassigned` |
-| Hierarchy | geometry-only linkage | semantic propose/assign/relabel |
-| Representation language | source language | English pivot / normalized language |
-| Privacy prompt | off | on |
-| Auditor | off | on |
+- 300–500 条人工 gold set；
+- 多位 annotator 与 adjudication；
+- 多语言 parity；
+- translation invariance；
+- multi-seed stability；
+- 跨 model/provider comparison；
+- alternative clusterer ablation；
+- B-cubed、pairwise F1、dendrogram purity 等完整指标矩阵；
+- LLM-as-judge program；
+- privacy canary benchmark；
+- `10^4+` scale / performance benchmark；
+- confidence interval 和长期 regression dashboard。
 
-每个 ablation 至少报告 quality、stability、privacy、latency 和 cost。
+只有 tracer bullet 证明链路有价值后，才根据实际 failure mode选择其中最需要的一项。
 
-## 6. 人工评审协议
+## 7. V1 通过意味着什么
 
-### 6.1 Blind review
+通过本 RFC 只意味着：
 
-- 隐藏系统名称、模型名称和配置；
-- 随机化候选顺序；
-- 对 label/hierarchy 使用 pairwise preference + absolute rubric；
-- 允许“二者都可接受”“二者都不可接受”；
-- 标注者不得只看 title，必须查看规定数量的成员与邻居。
+- pipeline 是真实的；
+- base clustering 不是明显随机；
+- hierarchy 结构合法；
+- 大部分标签和 parent 对人类是可理解的；
+- 下一轮工程投入有了可观察依据。
 
-### 6.2 Inter-annotator agreement
+它不意味着：
 
-根据任务类型报告：
+- 对真实生产数据同样有效；
+- 自动发现的 taxonomy 是唯一正确答案；
+- 对多语言、罕见主题或长尾样本可靠；
+- 结果具备隐私或匿名化保证；
+- 系统已达到 Clio 的内部质量。
 
-- Cohen’s kappa / Fleiss’ kappa；
-- Krippendorff’s alpha；
-- pairwise agreement；
-- disagreement distribution。
-
-若一致性低，应优先检查 rubric 是否含糊，而不是把分歧全部归咎于标注者。
-
-### 6.3 Error taxonomy
-
-每次 release 至少抽样记录：
-
-- facet omission；
-- facet hallucination；
-- semantic neighbor failure；
-- over-splitting；
-- under-splitting；
-- forced bad assignment；
-- vague label；
-- duplicate siblings；
-- wrong abstraction level；
-- multilingual drift；
-- privacy leakage；
-- evaluator disagreement。
-
-## 7. LLM-as-judge 约束
-
-允许使用 LLM judge，但必须：
-
-- 与被评系统尽量使用不同 model family；
-- 固定并版本化 rubric/prompt；
-- 在人工 gold subset 上校准；
-- 报告 judge 的 confusion matrix；
-- 对高风险 privacy examples 优先优化 recall；
-- 不把 judge 分数包装成客观真理；
-- 对模型升级执行 regression suite。
-
-## 8. 结果发布格式
-
-每份 evaluation report 至少包含：
-
-1. 数据集版本与样本构成；
-2. 完整 pipeline config；
-3. model/provider 与 prompt/schema versions；
-4. primary metrics 与 confidence interval；
-5. 分语言、分难度、分主题结果；
-6. stability；
-7. privacy；
-8. latency/cost；
-9. ablation；
-10. 失败案例；
-11. 已知 limitation；
-12. 与上一个版本的 regression / improvement。
-
-## 9. 不接受的成功证明
-
-以下证据单独出现时不足以宣称“准确”：
-
-- 一张漂亮的 UMAP；
-- 几个 cherry-picked cluster；
-- 一个高 silhouette score；
-- LLM 对自身输出的笼统好评；
-- cluster title 看起来像 taxonomy；
-- 在英文小样本上运行成功；
-- 没发现 PII 就宣称 privacy-preserving；
-- 与论文某个百分比数字相近但评估协议不同。
-
-## 10. 待讨论事项
-
-1. V1 gold set 的公开数据来源与许可；
-2. 是否将 provisional gates 设为 CI warning 还是 release blocker；
-3. 中文标注 rubric 是否需要语言学/领域双角色评审；
-4. stability 的主指标使用 AMI 还是 co-assignment agreement；
-5. 对 multi-topic records，主任务是 single-primary assignment 还是 multi-label evaluation；
-6. privacy auditor 的独立 gold set 如何构造；
-7. 哪些 benchmark artifacts 可以公开，哪些只能公开聚合指标。
