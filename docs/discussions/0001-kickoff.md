@@ -44,7 +44,7 @@ V1 是 **tracer bullet**：必须穿过真实组件，但只走一条路径。�
   -> hierarchy.json + report.md
 ```
 
-示例 config：
+默认 demo 参数（配置文件嵌套形态见 RFC 0003）：
 
 ```yaml
 seed: 42
@@ -54,7 +54,7 @@ representatives: 5
 contrastive: 3
 ```
 
-这不是最终默认参数，只是让第一颗 tracer bullet 穿过整条链路。
+这是第一份 demo 的明确起点；只有真实运行暴露问题后才调整，不是对任意数据的最优参数承诺。模型配置仍须在实现 issue #3 中选定并记录。
 
 ## V1 In scope
 
@@ -115,7 +115,7 @@ contrastive: 3
 
 建议：demo config 直接写 `leaf_k` 和 `hierarchy_k`，例如 `8 -> 3 -> 1`。
 
-要决定：第一份 demo 的 schedule。自动选 `k` 后移。
+先采用 `8 -> 3 -> 1`，检查的是最高非 root 的 3-parent 层；自动选 `k` 后移。
 
 ### D4. Label sample 数量
 
@@ -125,13 +125,13 @@ contrastive: 3
 
 ### D5. 最低 sanity floor
 
-建议：ARI `>= 0.45`、NMI `>= 0.60`、top-level accuracy `>= 0.75`，leaf/parent 人工 pass rate `>= 0.80`。
+采用：ARI `>= 0.45`、NMI `>= 0.60`、top-level accuracy `>= 0.75`，leaf/parent 人工 pass rate `>= 0.80`。top-level 指最高非 root parent 层，按原始记录多数映射；公式、分母和人工 rubric 以 RFC 0002 为准，未评审不算通过。
 
 这些只是发现明显失败的下限，不是产品 KPI。
 
 ### D6. 输出
 
-建议：V1 只做 `hierarchy.json` 与 `report.md`，不做 UI。
+主要交付是 `hierarchy.json` 与 `report.md`；同时保留 RFC 0003 §5 的九项本地 artifacts，不做 UI。
 
 要决定：Markdown tree 是否足够让我们判断下一步。
 
@@ -178,3 +178,4 @@ contrastive: 3
 | 2026-09-20 | 初稿采用 specification-first 完整边界 | 试图一次定义 target-state | Superseded |
 | 2026-09-20 | V1 改为 tracer bullet | 最快最简验证 embedding clustering 与 recursive hierarchy | Accepted |
 | 2026-09-20 | 多 backend、完整 evaluation/privacy/UI 后移 | 不应阻塞第一条真实链路 | Accepted |
+

@@ -4,6 +4,8 @@
 
 > **V1 是 tracer bullet，不是完备系统。** 目标是用最少代码、最少组件和最小数据集，尽快跑通一条真实的端到端路径，验证“facet embedding 能否形成有用聚类，以及 cluster 能否逐层抽象成可读 hierarchy”。
 
+当前仓库仍是文档 / scope 阶段：尚未提供 CLI、demo 数据或可运行实现。下面描述的是 V1 的目标，不是已完成能力。实现与真实运行证据由 [issue #3](https://github.com/thsno02/musical-computing-machine/issues/3) 跟踪；本次文档收敛不代表该 issue 已完成。
+
 ## V1 要验证的唯一问题
 
 给定一小批中文 AI 对话，能否通过一条固定 pipeline：
@@ -29,7 +31,7 @@ conversation JSONL
 - **输入**：仓库内置的 `100–300` 条中文 synthetic / 明确可公开对话；
 - **Facet**：只提取一个 `request` facet；
 - **模型栈**：只支持一套能工作的 LLM 与 embedding 配置；
-- **Base clustering**：只实现一种确定性 baseline，例如固定 `k` 的 KMeans；
+- **Base clustering**：只实现一种确定性 baseline，固定 `k` 的 KMeans；
 - **Labeling**：给模型少量 cluster 内代表样本和邻近 cluster 的 contrastive examples；
 - **Hierarchy**：把 `title + description` 重新 embedding，按显式的 `k` schedule 聚成更少的 parent nodes，并重新命名；
 - **输出**：JSON artifacts 和中文 Markdown report；
@@ -48,6 +50,8 @@ V1 完成只看下面几件事：
 5. leaf / parent labels 经一次轻量人工检查，大部分是准确、具体且彼此可区分的；
 6. 保存实际配置、模型名、seed、耗时和成本，便于复盘；
 7. report 默认不包含原始对话文本。
+
+默认 demo 参数为 `seed: 42`、`leaf_k: 8`、`hierarchy_k: [3, 1]`、`representatives: 5`、`contrastive: 3`。一条命令生成 artifacts 和待填写的 review 表；人工检查完成前不能宣称 V1 验收通过。
 
 详细口径见 [RFC 0002](docs/rfcs/0002-evaluation-protocol.md)。这些只是 tracer bullet 的 smoke criteria，不是产品质量保证。
 
@@ -99,3 +103,4 @@ V1 完成只看下面几件事：
 - [OpenClio](https://github.com/Phylliida/OpenClio)
 - [Kura](https://github.com/jxnl/kura)
 - [anthropic-clio-impl](https://github.com/adhishthite/anthropic-clio-impl)
+

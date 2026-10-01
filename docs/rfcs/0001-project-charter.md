@@ -112,7 +112,7 @@ request = 用户希望助手完成什么？
 
 ### 4.4 Base clustering
 
-- 使用一个简单 baseline，例如 KMeans；
+- 使用固定 seed 的 KMeans baseline；
 - `leaf_k` 由 demo config 显式指定；
 - 固定 seed；
 - V1 可以强制每条记录进入一个 cluster；
@@ -149,13 +149,16 @@ hierarchy_k: [3, 1]
 
 ### 4.7 输出
 
-V1 只输出：
+V1 的本地 artifacts 如下；字段以 [RFC 0003 §5](0003-architecture-contracts.md#5-最小-artifact-contract) 为准：
 
 - `run.json`；
 - `facets.jsonl`；
+- `embeddings.npy`；
+- `embedding_index.json`；
 - `leaf_assignments.jsonl`；
 - `nodes.jsonl`；
 - `hierarchy.json`；
+- `metrics.json`；
 - `report.md`。
 
 不要求数据库、网页、UMAP 或 interactive explorer。
@@ -237,3 +240,4 @@ Tracer bullet 运行后，根据实际 failure mode 决定下一步，而不是�
 | 2026-09-20 | V1 改为 tracer bullet | 最快、最简地验证核心链路，不以完备性为目标 |
 | 2026-09-20 | V1 只保证中文 demo、一套 stack、一个 facet、一个 clusterer | 避免在获得第一份证据前做过早抽象 |
 | 2026-09-20 | 完整 evaluation、privacy、multi-provider 和 explorer 后移 | 它们不是回答当前核心风险的必要条件 |
+

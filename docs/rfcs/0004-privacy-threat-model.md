@@ -95,7 +95,7 @@ Clio 原始工作把隐私视为核心目标之一，但当前仓库的 V1 核�
 member_count >= 5
 ```
 
-较小 cluster 仍可存在于本地 debug artifacts，但在 report 中标记为 suppressed。这个数字是 demo heuristic，不是隐私保证。
+较小 cluster 仍完整保存在本地 debug artifacts，供 coverage 和人工检查；report 只显示 suppressed 占位符，不附原标签、description、精确 count、record IDs 或 examples。这个数字是 demo heuristic，不是隐私保证。
 
 ## 6. 最小文本检查
 
@@ -158,7 +158,7 @@ V1 不建设通用 PII detector framework，也不保证 detector recall。
 - 维护者无法解释某个罕见 cluster 的来源；
 - run artifacts 中发现 credential。
 
-命令仍可保留本地 debug artifacts，但必须标记 `report_status: blocked`。
+命令仍可保留本地 debug artifacts 和不含命中文本的诊断 report，但必须在 `run.json` 标记 `report_status: blocked`。该状态独立于 pipeline / sanity 结果，不能因为完成聚类或人工质量检查而自动解除。未人工通读的普通输出为 `local_only`；安全检查和人工通读通过才可标为 `reviewed`（见 RFC 0003），并不自动发布。
 
 ## 10. Post-V1 才讨论的 privacy 能力
 
@@ -194,3 +194,4 @@ V1 不建设通用 PII detector framework，也不保证 detector recall。
 - [ ] generated text detector 未发现高风险内容；
 - [ ] public artifacts 已人工通读；
 - [ ] 文档没有声称匿名化或正式隐私保证。
+

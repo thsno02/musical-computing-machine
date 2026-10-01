@@ -24,7 +24,7 @@ load
 
 ## 1. 一条命令
 
-目标调用形态：
+目标调用形态（尚未实现；不是当前可执行的 quickstart）：
 
 ```bash
 uv run mcm run \
@@ -60,13 +60,13 @@ V1 只接受 conversation JSONL：
 
 - `id` 必填、稳定、唯一；
 - `messages` 必填；
-- `gold_leaf` / `gold_parent` 仅 demo benchmark 使用，真实输入可以省略；
+- `gold_leaf` / `gold_parent` 仅 demo benchmark 使用，必须与模型 / 聚类输入隔离；其他允许的非敏感 synthetic / public 输入可以省略，但不能通过 demo 验收；
 - V1 不支持 generic text、工单、数据库 adapter 或任意 metadata schema；
 - 输入 validation 只检查当前 pipeline 真正需要的字段。
 
 ## 3. 最小配置
 
-示例：
+默认 demo 参数（模型名仍待实现 issue #3 选择一套真实可用配置；占位值不得用于实际运行）：
 
 ```yaml
 seed: 42
@@ -91,6 +91,8 @@ output:
   include_raw_text_in_report: false
 ```
 
+上面嵌套结构是配置文件形态；其他文档 / issue 的平铺参数是同一组值的简写。实际执行前必须替换两个 model 占位值，并记录真实 provider、model、prompt version。这里不承诺某套模型已经验证通过。
+
 V1 不实现 config inheritance、provider registry、dynamic model routing 或自动 tuning。
 
 ## 4. 顺序 pipeline
@@ -104,7 +106,9 @@ V1 不实现 config inheritance、provider registry、dynamic model routing 或�
 - `messages` 非空；
 - 至少存在一条 user message。
 
-输出内存中的 records 和 input fingerprint。
+输出内存中的 records 和 input fingerprint（原始输入文件字节的 SHA-256）。模型调用前校验非空字符串 `id`、message `role` / `content` 类型，以及至少一条非空 user message；gold 字段单独留给 metrics。
+
+`leaf_k` 必须为整数且 `1 < leaf_k <= input_count`；`hierarchy_k` 为正整数序列，从 leaf count 开始严格递减并以 `1` 结束。用于 V1 验收时至少有一个大于 1 的 parent 层。sample 数量必须为非负整数，representatives 至少为 1。无效配置在调用模型前失败。
 
 ### 4.2 Extract request facet
 
@@ -144,10 +148,13 @@ V1 不建立 `EmbeddingBackend` protocol。
 
 ```python
 assignments = KMeans(
-    n_clusters=config.leaf_k,
-    random_state=config.seed,
+    n_clusters=config["clustering"]["leaf_k"],
+    random_state=config["seed"],
+    n_init=10,
 ).fit_predict(embeddings)
 ```
+
+在 requests 和各层 node embeddings 上统一做 L2 normalization，使用 Euclidean distance；记录 normalization 和库版本。拒绝零向量、非有限数值、维度不一致或与 ID index 不一致的 embedding。每层 KMeans 固定 `n_init=10` 和 run seed；若实际非空 groups 少于目标 `k`，标记 stage 失败，不伪造空节点或静默改变 schedule。
 
 V1 不自动选择 `k`，也不处理 noise / `unassigned`。显式 `leaf_k` 是 tracer bullet 的有意简化。
 
@@ -158,7 +165,9 @@ V1 不自动选择 `k`，也不处理 noise / `unassigned`。显式 `leaf_k` 是
 - representatives：选择离 centroid 最近的 `N` 个 request facets；
 - contrastive examples：选择离该 centroid 最近、但属于其他 cluster 的 `M` 个 request facets。
 
-只把 facet 文本发送给 labeler，不默认发送完整对话。
+`N = min(representatives, cluster_size)`、`M = min(contrastive, outside_count)`；不重复采样。距离相同时按 record ID 的 Unicode 字典序排序，并将不足额情况写入 warnings。距离使用与 clustering 相同的归一化向量和 centroid。
+
+只把 facet 文本发送给 labeler，不发送完整对话或 gold labels。
 
 ### 4.6 Label leaves
 
@@ -190,7 +199,7 @@ V1 不实现多模型 voting、label repair 或独立 judge。
 node_text = title + "。" + description
 ```
 
-然后对 node texts embedding，并按 `hierarchy_k` 逐层运行 KMeans。
+然后对 node texts 重新 embedding，并按 `hierarchy_k` 逐层运行 KMeans，使用 §4.4 相同的 normalization、seed、`n_init` 和失败规则。每个 child node 是一个等权样本；`member_count` 用于 label context 和数量汇总，不作为聚类权重。
 
 对于 `leaf_k: 8`、`hierarchy_k: [3, 1]`：
 
@@ -221,10 +230,12 @@ Report 至少包含：
 - 数据集与配置摘要；
 - base clustering metrics；
 - hierarchy tree；
-- 每个 node 的 title、description 和 count；
+- 仅符合 [RFC 0004](0004-privacy-threat-model.md) 输出规则的 node title、description 和 count；小 cluster 使用不含原标签、精确 count 或样本的 suppressed 占位符；
 - 轻量人工 review 表；
 - runtime / token / cost；
 - 已知限制。
+
+完整 nodes / topology 保存在本地 artifacts，不受 report 展示过滤影响；coverage、metrics 和人工 review 基于完整数据。report tree 是展示投影，不能反过来改变 clustering 或 hierarchy。命中安全检查时只生成本地 blocked 诊断，不输出被拦截文本。
 
 ## 5. 最小 artifact contract
 
@@ -247,10 +258,13 @@ runs/<run_id>/
 {
   "run_id": "demo",
   "status": "completed|failed|failed_sanity",
+  "review_status": "pending|passed|failed",
+  "report_status": "local_only|blocked|reviewed",
   "code_revision": "git-sha",
   "input_fingerprint": "sha256:...",
   "config": {},
   "models": {},
+  "prompt_version": "request-v1/leaf-v1/parent-v1",
   "seed": 42,
   "stages": [],
   "runtime_seconds": 0,
@@ -258,6 +272,10 @@ runs/<run_id>/
   "warnings": []
 }
 ```
+
+`completed` 只说明执行和自动检查完成；人工未完成时 `review_status` 仍为 `pending`。任一自动 / 人工 floor 不通过用 `failed_sanity`，执行异常或结构不合法用 `failed`；两者优先于 `completed`。自动失败返回非零 exit code，人工评审失败更新 artifacts，不追溯修改已结束命令的 exit code。
+
+`report_status` 独立记录：未人工通读前为 `local_only`；RFC 0004 安全阻断为 `blocked`，不得被质量通过覆盖；安全检查和人工通读均通过后为 `reviewed`。`reviewed` 不是自动发布授权，也不是生产隐私保证。
 
 ### 5.2 `facets.jsonl`
 
@@ -295,15 +313,25 @@ runs/<run_id>/
 {
   "root_ids": ["root-00"],
   "levels": [
-    ["leaf-00", "leaf-01"],
+    ["leaf-00", "leaf-01", "leaf-02"],
     ["parent-00", "parent-01"],
     ["root-00"]
   ],
   "edges": [
-    {"child": "leaf-01", "parent": "parent-00"}
+    {"child": "leaf-00", "parent": "parent-00"},
+    {"child": "leaf-01", "parent": "parent-00"},
+    {"child": "leaf-02", "parent": "parent-01"},
+    {"child": "parent-00", "parent": "root-00"},
+    {"child": "parent-01", "parent": "root-00"}
   ]
 }
 ```
+
+上例为满足 invariants 的 `3 -> 2 -> 1` 最小结构示例；默认 demo 仍为 `8 -> 3 -> 1`。所有引用的 node IDs 都必须在 `nodes.jsonl` 中存在；leaf 的 `child_ids` 为空列表。
+
+### 5.6 Embedding index 与 metrics
+
+`embedding_index.json` 是按 `embeddings.npy` 行顺序排列的唯一 record ID 数组，长度等于输入记录数；不得用隐式文件排序重新对齐。`metrics.json` 保存 ARI、NMI、cluster sizes、parent-level evaluated level / mapping / accuracy，以及人工 review 的逐项结果和 pass rate。无法计算的指标记 `null` 并说明原因，不能填 0 或算作通过。
 
 V1 schemas 可以变化，但每个 breaking change 应与代码一起提交，不需要先建设 schema registry。
 
@@ -355,3 +383,4 @@ tests/
 - JSON/Markdown 不足以理解结果：构建 explorer。
 
 在此之前，最简单、最透明的实现优先。
+

@@ -24,6 +24,8 @@ V1 使用一份小型、版本化的中文数据集：
 - 不包含真实敏感信息；
 - 每条记录具有 `gold_leaf` 和 `gold_parent`，仅用于 sanity check。
 
+`gold_leaf` / `gold_parent` 只进入评估：不得发送给 facet extractor / labeler，也不得用于 embedding、clustering、sampling 或 parent grouping。只有评估阶段才能读取 gold，避免把已知答案泄漏进 pipeline。缺少任何 gold 的输入可以用于探索，但不能声称通过本 demo 验收。
+
 数据集应足够小，使失败后整条 pipeline 可以直接重跑；也应足够多，使 embedding 和 clustering 不是对十几条样本的玩具展示。
 
 ## 2. 自动验收
@@ -72,12 +74,21 @@ V1 的最低 sanity floor：
 - 没有 cycle；
 - 每个 leaf 都能到达 root；
 - 每层 node count 严格减少；
-- parent 的 `member_count` 等于 descendants 的聚合；
+- 恰好一个 root，root 的 `member_count` 等于输入记录数；
+- leaf 的 `member_count` 等于其 assignments 数；parent 的 `member_count` 等于 `sum(child.member_count)`（只计算直接 children）（不重复累加多层 descendants）；
 - 没有 orphan node。
 
 ### 2.5 Parent-level sanity
 
-把 discovered parent 映射到其 children 中占多数的 `gold_parent`，报告 majority-mapped accuracy。
+`top_level_accuracy` 固定评估 **最高的非 root parent 层**，不评估单一 root。在默认 `8 -> 3 -> 1` 中评估的是 3 个 parent。验收 schedule 必须包含至少一层非 root parent；不能只用 `8 -> 1` 规避粗粒度检查。
+
+对每条输入记录沿 leaf → ancestor 找到该层 parent，以该 parent 下所有原始记录的 `gold_parent` 多数票作为预测；按记录数加权，不按 child node 数投票。并列时按 gold label 的 Unicode 字典序取第一个，记录 mapping 和 evaluated level 到 `metrics.json`。
+
+```text
+top_level_accuracy = sum(max_gold_count_in_parent) / input_count
+```
+
+分母为完整 demo 的输入记录数；任何缺失 assignment 或 gold 都是验收失败，不能静默剔除。不同 discovered parents 可以映射到同一 gold label；这是多数映射 sanity check，不是一对一 taxonomy 匹配。
 
 V1 floor：
 
@@ -105,11 +116,13 @@ top_level_accuracy >= 0.75
 
 ## 3. 一次轻量人工检查
 
-V1 不建立多人标注流程。由维护者完成一次结构化 review，并把结果提交到 `report.md`。
+V1 不建立多人标注流程。命令生成空白 review 表，`review_status: pending`；维护者基于本地 artifacts 检查后记录 reviewer、日期、逐项结果、分子/分母和理由。未填写项不能算 pass。`report.md` 只包含符合 RFC 0004 输出边界的 review 内容，受抑制节点的逐项证据留在本地 `metrics.json`，不复制样本到报告。
+
+人工检查结束后，填写 `metrics.json` / `report.md` 并同步 `run.json` 的最终状态即可；不要求额外 review 服务或自动 judge。自动运行成功仅代表 pipeline 完成，全部自动 floor、人工 floor 和中文可读性检查都通过后才能声称 V1 验收通过。
 
 ### 3.1 Leaf label review
 
-如果 leaf clusters 不超过 20 个，则检查全部；否则随机检查 20 个。
+如果 leaf clusters 不超过 20 个，则检查全部；否则用 run seed 从按 `node_id` 排序的列表中无放回抽取 20 个，并记录抽样 ID。检查范围包含 report 中受抑制的 nodes。分母为实际选定的检查数，不能删去不合格或未填写项。
 
 每个 label 回答三个 yes/no 问题：
 
@@ -127,11 +140,13 @@ leaf_label_pass_rate >= 0.80
 
 ### 3.2 Parent review
 
-检查全部 parent nodes：
+检查全部 parent nodes（包含 root；不包含 leaves）：
 
 1. children 是否大体属于这个 parent？
 2. parent 是否比 children 更抽象，而不是简单复制某个 child？
 3. sibling parents 是否明显重复？
+
+第 1、2 项为 yes 且第 3 项为 no 才算 pass；没有 sibling 的节点（含单一 root）第 3 项记 N/A，其余项仍必须通过。`parent_fit_pass_rate = passing_parent_count / total_parent_count`；未填写项不能算 pass。
 
 V1 floor：
 
@@ -166,8 +181,8 @@ V1 不设置成本门槛。记录这些数字的目的，是决定下一个最�
 
 任一 floor 未通过时：
 
-1. 仍保存 artifacts 和 report；
-2. 明确标记 run 为 `failed_sanity`；
+1. 仍保存可用的本地 artifacts 和诊断 report；RFC 0004 的输出抑制 / blocked 规则始终优先，不得为了诊断泄露命中文本；
+2. 自动或人工 floor 未通过时标记 `status: failed_sanity`；人工未完成时用 `review_status: pending`，不能当作通过；
 3. 列出最可能的失败阶段；
 4. 只修最靠前、最有解释力的一个问题；
 5. 不通过增加框架层、更多 backend 或更复杂 UI 来掩盖质量问题。
@@ -215,3 +230,4 @@ V1 不设置成本门槛。记录这些数字的目的，是决定下一个最�
 - 对多语言、罕见主题或长尾样本可靠；
 - 结果具备隐私或匿名化保证；
 - 系统已达到 Clio 的内部质量。
+
